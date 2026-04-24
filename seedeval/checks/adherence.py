@@ -48,6 +48,9 @@ Return JSON with EXACTLY these keys and no others:
 class AdherenceCheck(Check):
     name = "adherence"
 
+    def __init__(self, frame_callback=None) -> None:
+        self.frame_callback = frame_callback
+
     async def run(self, run_id: str, conn: sqlite3.Connection) -> CheckResult:
         run_row = get_run(conn, run_id)
         if run_row is None:
@@ -61,20 +64,33 @@ class AdherenceCheck(Check):
 
         token = set_active_run_id(run_id)
         try:
-            responses = await asyncio.gather(
-                *[
-                    judge_frame(
-                        frame_path=row["image_path"],
-                        prompt=run_row["prompt"],
-                        prompt_text=_build_adherence_prompt(
-                            run_row["prompt"],
-                            row["idx"],
-                            row["timestamp_s"],
-                        ),
+            async def judge_with_row(row):
+                response = await judge_frame(
+                    frame_path=row["image_path"],
+                    prompt=run_row["prompt"],
+                    prompt_text=_build_adherence_prompt(
+                        run_row["prompt"],
+                        row["idx"],
+                        row["timestamp_s"],
+                    ),
+                )
+                return row, response
+
+            tasks = [asyncio.create_task(judge_with_row(row)) for row in frame_rows]
+            responses_by_frame_id: dict[int, dict] = {}
+            for task in asyncio.as_completed(tasks):
+                row, response = await task
+                responses_by_frame_id[row["id"]] = response
+                if self.frame_callback is not None:
+                    await self.frame_callback(
+                        {
+                            "stage": "frame_judged",
+                            "check": self.name,
+                            "frame_idx": row["idx"],
+                            "score": int(response.get("overall", response.get("score", 0)) or 0),
+                        }
                     )
-                    for row in frame_rows
-                ]
-            )
+            responses = [responses_by_frame_id[row["id"]] for row in frame_rows]
         finally:
             reset_active_run_id(token)
 

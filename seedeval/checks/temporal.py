@@ -20,6 +20,9 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 class TemporalCheck(Check):
     name = "temporal"
 
+    def __init__(self, drift_threshold: float = 0.7) -> None:
+        self.drift_threshold = drift_threshold
+
     async def run(self, run_id: str, conn: sqlite3.Connection) -> CheckResult:
         frame_rows = get_frames(conn, run_id)
         if not frame_rows:
@@ -50,7 +53,7 @@ class TemporalCheck(Check):
             idx for idx, value in enumerate(smoothness) if value < smooth_threshold
         ]
         flagged_drift_indices = [
-            idx for idx, value in enumerate(drift) if value < 0.7
+            idx for idx, value in enumerate(drift) if value < self.drift_threshold
         ]
 
         raw_score = 10 * (1 - ((len(flagged_smooth_indices) + len(flagged_drift_indices)) / 16))
@@ -68,7 +71,7 @@ class TemporalCheck(Check):
                 "flagged_drift_indices": flagged_drift_indices,
                 "smoothness_mean": smooth_mean,
                 "smoothness_stdev": smooth_std,
-                "drift_threshold": 0.7,
+                "drift_threshold": self.drift_threshold,
             },
             created_at=datetime.now(timezone.utc),
         )
