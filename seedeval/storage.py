@@ -7,6 +7,9 @@ import subprocess
 from pathlib import Path
 
 import imageio_ffmpeg
+import open_clip
+import torch
+from PIL import Image
 
 from seedeval.config import get_settings
 
@@ -90,3 +93,24 @@ def extract_frames(video: Path, run_id: str, count: int = 8) -> list[tuple[int, 
         extracted.append((idx, timestamp_s, output))
 
     return extracted
+
+
+def compute_clip_embeddings(frame_paths: list[Path]) -> list[bytes]:
+    logger.info("Loading CLIP ViT-B/32 on CPU")
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-32",
+        pretrained="openai",
+        device="cpu",
+    )
+    model.eval()
+
+    embeddings: list[bytes] = []
+    with torch.no_grad():
+        for idx, path in enumerate(frame_paths):
+            logger.info("Embedding frame %s/%s", idx + 1, len(frame_paths))
+            image = preprocess(Image.open(path).convert("RGB")).unsqueeze(0)
+            embedding = model.encode_image(image)
+            embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+            vector = embedding.squeeze(0).cpu().numpy().astype("float32")
+            embeddings.append(vector.tobytes())
+    return embeddings

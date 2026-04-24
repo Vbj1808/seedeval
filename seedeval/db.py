@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from seedeval.config import get_settings
-from seedeval.models import Frame, Run
+from seedeval.models import CheckResult, Frame, FrameCritique, Run
 
 
 SCHEMA_SQL = """
@@ -119,8 +119,44 @@ def insert_frames(conn: sqlite3.Connection, frames: Iterable[Frame]) -> None:
     )
 
 
+def update_run_fields(conn: sqlite3.Connection, run_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+
+    assignments: list[str] = []
+    values: list[Any] = []
+    for column, value in fields.items():
+        assignments.append(f"{column} = ?")
+        if isinstance(value, Path):
+            values.append(str(value))
+        elif isinstance(value, dict):
+            values.append(json.dumps(value))
+        else:
+            values.append(value)
+    values.append(run_id)
+
+    conn.execute(
+        f"UPDATE runs SET {', '.join(assignments)} WHERE id = ?",
+        values,
+    )
+
+
 def get_run(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+
+
+def list_runs(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT id, prompt, model, status, overall_score, total_cost_usd, created_at
+            FROM runs
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    )
 
 
 def get_frames(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
@@ -138,3 +174,126 @@ def count_runs_created_on(conn: sqlite3.Connection, day_prefix: str) -> int:
         (f"{day_prefix}%",),
     ).fetchone()
     return int(row["count"])
+
+
+def delete_check_rows(conn: sqlite3.Connection, run_id: str, check_name: str) -> None:
+    conn.execute(
+        "DELETE FROM check_results WHERE run_id = ? AND check_name = ?",
+        (run_id, check_name),
+    )
+    conn.execute(
+        """
+        DELETE FROM frame_critiques
+        WHERE check_name = ?
+          AND frame_id IN (SELECT id FROM frames WHERE run_id = ?)
+        """,
+        (check_name, run_id),
+    )
+
+
+def insert_check_result(conn: sqlite3.Connection, result: CheckResult) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO check_results (run_id, check_name, score, passed, details, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            result.run_id,
+            result.check_name,
+            result.score,
+            None if result.passed is None else int(result.passed),
+            json.dumps(result.details),
+            result.created_at.isoformat(),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def insert_frame_critiques(conn: sqlite3.Connection, critiques: Iterable[FrameCritique]) -> None:
+    conn.executemany(
+        """
+        INSERT INTO frame_critiques (frame_id, check_name, score, flagged, reason)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                critique.frame_id,
+                critique.check_name,
+                critique.score,
+                None if critique.flagged is None else int(critique.flagged),
+                critique.reason,
+            )
+            for critique in critiques
+        ],
+    )
+
+
+def get_check_results(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT *
+            FROM check_results
+            WHERE run_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    )
+
+
+def get_frame_critiques(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT fc.id, fc.frame_id, fc.check_name, fc.score, fc.flagged, fc.reason,
+                   f.idx AS frame_idx, f.timestamp_s, f.image_path
+            FROM frame_critiques fc
+            JOIN frames f ON f.id = fc.frame_id
+            WHERE f.run_id = ?
+            ORDER BY f.idx ASC, fc.id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    )
+
+
+def serialize_run_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"],
+        "prompt": row["prompt"],
+        "model": row["model"],
+        "video_path": row["video_path"],
+        "status": row["status"],
+        "total_cost_usd": row["total_cost_usd"],
+        "total_latency_s": row["total_latency_s"],
+        "overall_score": row["overall_score"],
+        "raw_config": json.loads(row["raw_config"]) if row["raw_config"] else {},
+    }
+
+
+def serialize_check_result_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "run_id": row["run_id"],
+        "check_name": row["check_name"],
+        "score": row["score"],
+        "passed": None if row["passed"] is None else bool(row["passed"]),
+        "details": json.loads(row["details"]),
+        "created_at": row["created_at"],
+    }
+
+
+def serialize_frame_critique_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "frame_id": row["frame_id"],
+        "check_name": row["check_name"],
+        "score": row["score"],
+        "flagged": None if row["flagged"] is None else bool(row["flagged"]),
+        "reason": row["reason"],
+        "frame_idx": row["frame_idx"],
+        "timestamp_s": row["timestamp_s"],
+        "image_path": row["image_path"],
+    }

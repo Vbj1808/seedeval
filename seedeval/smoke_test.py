@@ -3,11 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 
-import open_clip
-import torch
-from PIL import Image
 from ulid import ULID
 
 from seedeval.config import configure_logging, get_settings
@@ -22,7 +18,7 @@ from seedeval.db import (
 )
 from seedeval.models import Frame, Run
 from seedeval.providers.aimlapi import AIMLAPISeedanceProvider
-from seedeval.storage import extract_frames, get_video_duration_s
+from seedeval.storage import compute_clip_embeddings, extract_frames, get_video_duration_s
 
 logger = logging.getLogger(__name__)
 
@@ -33,28 +29,6 @@ FRAME_COUNT = 8
 
 def _new_run_id() -> str:
     return str(ULID())
-
-
-def _compute_clip_embeddings(frame_paths: list[Path]) -> list[bytes]:
-    logger.info("Loading CLIP ViT-B/32 on CPU")
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-32",
-        pretrained="openai",
-        device="cpu",
-    )
-    model.eval()
-
-    embeddings: list[bytes] = []
-    with torch.no_grad():
-        for idx, path in enumerate(frame_paths):
-            logger.info("Embedding frame %s/%s", idx + 1, len(frame_paths))
-            image = preprocess(Image.open(path).convert("RGB")).unsqueeze(0)
-            embedding = model.encode_image(image)
-            embedding = embedding / embedding.norm(dim=-1, keepdim=True)
-            vector = embedding.squeeze(0).cpu().numpy().astype("float32")
-            embeddings.append(vector.tobytes())
-    return embeddings
-
 
 async def main() -> None:
     configure_logging()
@@ -76,7 +50,7 @@ async def main() -> None:
 
     extracted = extract_frames(generated.video_path, run_id, count=FRAME_COUNT)
     frame_paths = [path for _, _, path in extracted]
-    embeddings = _compute_clip_embeddings(frame_paths)
+    embeddings = compute_clip_embeddings(frame_paths)
 
     run = Run(
         id=run_id,
